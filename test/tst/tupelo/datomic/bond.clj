@@ -6,6 +6,7 @@
     [schema.core :as s]
     [tupelo.datomic :as td]
     [tupelo.schema :as ts]
+    [tupelo.datomic.schema :as tdsk]
     ))
 
 (def datomic-uri "datomic:mem://tst.bond") ; the URI for our test db
@@ -34,9 +35,9 @@
 (s/defn get-people :- ts/Set
   "Returns a set of entity maps for all entities with the :person/name attribute"
   [db-val :- s/Any]
-  (let [eids (onlies (td/find 
+  (let [eids (onlies (td/query
                        :let [$ db-val]
-                       :find [?eid] ; <- could also use Datomic Pull API
+                       :yield [?eid] ; <- could also use Datomic Pull API
                        :where {:db/id ?eid :person/name _}))]
     (set (for [eid eids]
            (td/entity-map db-val eid)))))
@@ -46,7 +47,7 @@
 ; demo to show changing an attribute (string -> integer, cardinality/one -> many, deleting an attribute
 ; example of retracting 1 item from a normal (cardinality/one) attribute & a cardinality/many attribute
 
-(deftest t-james-bond
+(dotest
   ; Create some new attributes. Required args are the attribute name (an optionally namespaced
   ; keyword) and the attribute type (full listing at http://docs.datomic.com/schema.html). We wrap
   ; the new attribute definitions in a transaction and immediately commit them into the DB.
@@ -84,10 +85,11 @@
             {:person/name "Dr No"         :location "Caribbean"   :weapon/type #{:weapon/gun               } } } )
 
   ; Using James' name, lookup his EntityId (EID). It is a java.lang.Long that is a unique ID across the whole DB.
-  (let [james-eid   (only2 (td/find  :let [$ (live-db)] ; like Clojure let
-                                     :find [?eid]
-                                     :where {:db/id ?eid :person/name "James Bond"}))
-        _ (s/validate ts/Eid james-eid)  ; verify the expected type
+  (let [james-eid   (only2 (td/query
+                             :let [$ (live-db)] ; like Clojure let
+                             :yield [?eid]
+                             :where {:db/id ?eid :person/name "James Bond"}))
+        _ (s/validate tdsk/Eid james-eid)  ; verify the expected type
         ; Retrieve James' attr-val pairs as a map. An entity can be referenced either by EID or by a
         ; LookupRef, which is a unique attribute-value pair expressed as a vector.
         james-map   (td/entity-map (live-db) james-eid)                       ; lookup by EID
@@ -120,11 +122,13 @@
 
     ;-----------------------------------------------------------------------------
     ; Search for people that match both {:weapon/type :weapon/guile} and {:weapon/type :weapon/gun}
-    (let [tuple-set   (td/find :let    [$ (live-db)]
-                               :find   [?name]
-                               :where  {:person/name ?name :weapon/type :weapon/guile }
-                                       {:person/name ?name :weapon/type :weapon/gun } ) ]
-      (is= #{["Dr No"] ["M"]} tuple-set ))
+    (let [tuple-set (td/query
+                      :let [$ (live-db)]
+                      :yield [?name]
+                      :where
+                        {:person/name ?name :weapon/type :weapon/guile}
+                        {:person/name ?name :weapon/type :weapon/gun})]
+      (is= #{["Dr No"] ["M"]} tuple-set))
 
     ;-----------------------------------------------------------------------------
     ; Try to add non-existent weapon. This throws since the bogus kw does not match up with an entity.
@@ -170,62 +174,67 @@
 
   ; For general queries, use td/find.  It returns a set of tuples (a TupleSet).  Duplicate
   ; tuples in the result will be discarded.
-  (let [tuple-set   (td/find   :let    [$ (live-db)]
-                               :find   [?name ?loc] ; <- shape of output tuples
-                               :where  {:person/name ?name :location ?loc} )
-  ]
+  (let [tuple-set (td/query
+                    :let [$ (live-db)]
+                    :yield [?name ?loc] ; <- shape of output tuples
+                    :where {:person/name ?name :location ?loc})]
     (s/validate  ts/TupleSet  tuple-set)       ; verify expected type using Prismatic Schema
     (s/validate #{ [s/Any] }  tuple-set)       ; literal definition of TupleSet
     (is= tuple-set #{ ["Dr No"       "Caribbean"]      ; Even though London is repeated, each tuple is
-                        ["James Bond"  "London"]         ; still unique. Otherwise, any duplicate tuples
-                        ["M"           "London"] } ))   ; will be discarded since output is a clojure set.
+                      ["James Bond"  "London"]         ; still unique. Otherwise, any duplicate tuples
+                      ["M"           "London"] } ))   ; will be discarded since output is a clojure set.
 
   ; If you want just a single attribute as output, you can get a set of attributes (rather than a set of
   ; tuples) use (onlies ...).  As usual, any duplicate values will be discarded. It is an error if
-  ; more than one attribute is present in the :find clause.
-  (let [names     (onlies (td/find :let [$ (live-db)]
-                            :find [?name] ; <- a single attr-val output
-                            :where {:person/name ?name}))
-        cities    (onlies (td/find :let [$ (live-db)]
-                            :find [?loc] ; <- a single attr-val output
-                            :where {:location ?loc}))
+  ; more than one attribute is present in the :result clause.
+  (let [names  (onlies (td/query
+                         :let [$ (live-db)]
+                         :yield [?name] ; <- a single attr-val output
+                         :where {:person/name ?name}))
+        cities (onlies (td/query :let [$ (live-db)]
+                         :yield [?loc] ; <- a single attr-val output
+                         :where {:location ?loc}))
         ]
-    (is= names    #{"Dr No" "James Bond" "M"} )  ; all names are present, since unique
-    (is= cities   #{"Caribbean" "London"} ))     ; duplicate "London" discarded
+    (is= names #{"Dr No" "James Bond" "M"}) ; all names are present, since unique
+    (is= cities #{"Caribbean" "London"})) ; duplicate "London" discarded
 
   ; If you want just a single tuple as output, use (only ...)
-  (let [beachy    (only (td/find :let [$ (live-db) ; assign multiple find variables
-                                       ?loc "Caribbean"] ;   just like clojure 'let' special form
-                          :find [?eid ?name] ; <- output tuple shape
-                          :where {:db/id ?eid :person/name ?name :location ?loc}))
-        busy      (try ; error - both James & M are in London
-                    (only (td/find :let [$ (live-db)
-                                         ?loc "London"]
-                            :find [?eid ?name] ; <- output tuple shape
-                            :where {:db/id ?eid :person/name ?name :location ?loc}))
-                    (catch Exception ex (.toString ex)))
-  ]
-    (is (wild-match? [:* "Dr No"] beachy ))           ; found 1 match as expected
-    (is (re-find #"Exception" busy)))  ; Exception thrown/caught since 2 people in London
+  (let [beachy (only (td/query
+                       :let [$ (live-db) ; assign multiple find variables
+                             ?loc "Caribbean"] ;   just like clojure 'let' special form
+                       :yield [?eid ?name] ; <- output tuple shape
+                       :where {:db/id ?eid :person/name ?name :location ?loc}))
+        busy   (try ; error - both James & M are in London
+                 (only (td/query :let [$ (live-db)
+                                       ?loc "London"]
+                         :yield [?eid ?name] ; <- output tuple shape
+                         :where {:db/id ?eid :person/name ?name :location ?loc}))
+                 (catch Exception ex (.toString ex)))
+        ]
+    (is (wild-match? [:* "Dr No"] beachy)) ; found 1 match as expected
+    (is (re-find #"Exception" busy))) ; Exception thrown/caught since 2 people in London
 
   ; If you know there is (or should be) only a single scalar answer, use (only2 ...)
-  (let [beachy    (only2 (td/find :let [$ (live-db) ; assign multiple find variables
-                                        ?loc "Caribbean"] ; just like clojure 'let' special form
-                           :find [?name]
+  ;   It translates into `(only (only ...))`, like "only-squared".
+  (let [beachy    (only2 (td/query
+                           :let [$ (live-db) ; assign multiple find variables
+                                 ?loc "Caribbean"] ; just like clojure 'let' special form
+                           :yield [?name]
                            :where {:person/name ?name :location ?loc}))
         busy      (try ; error - multiple results for London
-                    (only2 (td/find :let [$ (live-db)
-                                          ?loc "London"]
-                             :find [?eid]
+                    (only2 (td/query
+                             :let [$ (live-db)
+                                   ?loc "London"]
+                             :yield [?eid]
                              :where {:db/id ?eid :person/name ?name :location ?loc}))
                     (catch Exception ex (.toString ex)))
         multi     (try ; error - tuple [?eid ?name] is not scalar
-                    (only2 (td/find :let [$ (live-db)
-                                          ?loc "Caribbean"]
-                             :find [?eid ?name]
+                    (only2 (td/query
+                             :let [$ (live-db)
+                                   ?loc "Caribbean"]
+                             :yield [?eid ?name]
                              :where {:db/id ?eid :person/name ?name :location ?loc}))
-                    (catch Exception ex (.toString ex)))
-  ]
+                    (catch Exception ex (.toString ex))) ]
     (is= beachy "Dr No")               ; found 1 match as expected
     (is (re-find #"Exception" busy))   ; Exception thrown/caught since 2 people in London
     (is (re-find #"Exception" multi))) ; Exception thrown/caught since 2-vector is not scalar
@@ -236,11 +245,11 @@
 
   ; If you wish to retain duplicate results on output, you must use td/find-pull and the Datomic
   ; Pull API to return a list of results (instead of a set).
-  (let [result-pull     (td/find-pull   :let    [$ (live-db)]                 ; $ is the implicit db name
-                                        :find   [ (pull ?eid [:location]) ]   ; output :location for each ?eid found
-                                        :where  { :db/id ?eid :location _ } )        ; find any ?eid with a :location attr
-        result-sort     (sort-by #(-> % only :location) result-pull)
-  ]
+  (let [result-pull     (td/query-pull
+                          :let [$ (live-db)] ; $ is the implicit db name
+                          :yield [(pull ?eid [:location])] ; output :location for each ?eid found
+                          :where {:db/id ?eid :location _}) ; find any ?eid with a :location attr
+        result-sort     (sort-by #(-> % only :location) result-pull) ]
     (s/validate [ts/TupleMap]   result-pull)  ; a list of tuples of maps
     (s/validate  ts/TupleMaps   result-pull)  ; a list of tuples of maps
     (is= result-sort [[{:location "Caribbean"}]
@@ -255,7 +264,7 @@
 ;;  ; If you wish to retain duplicate results on output, you must use td/query-pull and the Datomic
 ;;  ; Pull API to return a list of results (instead of a set).
 ;;  (let [result-pull     (td/query-pull  :let    [$ (live-db)]                 ; $ is the implicit db name
-;;                                        :find   [ (pull ?eid [:location]) ]   ; output :location for each ?eid found
+;;                                        :result   [ (pull ?eid [:location]) ]   ; output :location for each ?eid found
 ;;                                        :where  [ [?eid :location] ] )        ; find any ?eid with a :location attr
 ;;        result-sort     (sort-by #(-> % only :location) result-pull)
 ;;  ]
@@ -271,14 +280,13 @@
     (td/new-partition :people ))
 
   ; Create Honey Rider and add her to the :people partition
-  (let [tx-result   @(td/transact *conn*
-                        (td/new-entity :people ; <- partition is first arg (optional) to td/new-entity
-                          { :person/name "Honey Rider" :location "Caribbean" :weapon/type #{:weapon/knife} } ))
-        [honey-eid]  (td/eids tx-result)          ; retrieve Honey Rider's EID from the seq (destructuring)
-         honey-eid2  (only (td/eids tx-result))   ;   or use 'only' to unwrap it
-        tx-datoms   (td/tx-datoms (live-db) tx-result)
-  ]
-    (s/validate ts/Eid honey-eid)  ; verify the expected type
+  (let [tx-result  @(td/transact *conn*
+                      (td/new-entity :people ; <- partition is first arg (optional) to td/new-entity
+                        {:person/name "Honey Rider" :location "Caribbean" :weapon/type #{:weapon/knife}}))
+        [honey-eid] (td/eids tx-result) ; retrieve Honey Rider's EID from the seq (destructuring)
+        honey-eid2 (only (td/eids tx-result)) ;   or use 'only' to unwrap it
+        tx-datoms  (td/tx-datoms (live-db) tx-result)]
+    (s/validate tdsk/Eid honey-eid)  ; verify the expected type
     (is= honey-eid honey-eid2)
     (is= :people ; verify the partition name for Honey's EID
            (td/partition-name (live-db) honey-eid))
@@ -318,9 +326,10 @@
 
   ; Once James has defeated Dr No, we need to remove him (& everything he possesses) from the database.
   ; We see that Dr No is in the DB...
-  (let [tuple-set   (td/find  :let    [$ (live-db)]
-                              :find   [?name ?loc] ; <- shape of output tuples
-                              :where  {:person/name ?name :location ?loc} ) ]
+  (let [tuple-set (td/query
+                    :let [$ (live-db)]
+                    :yield [?name ?loc] ; <- shape of output tuples
+                    :where {:person/name ?name :location ?loc}) ]
     (is= tuple-set #{["James Bond" "London"]
                      ["M" "London"]
                      ["Dr No" "Caribbean"]
@@ -329,26 +338,27 @@
   (td/transact *conn*
     (td/retract-entity [:person/name "Dr No"] ))
   ; ...and now he's gone!
-  (let [tuple-set   (td/find  :let    [$ (live-db)]
-                              :find   [?name ?loc]
-                              :where  {:person/name ?name :location ?loc} ) ]
+  (let [tuple-set (td/query
+                    :let [$ (live-db)]
+                    :yield [?name ?loc]
+                    :where {:person/name ?name :location ?loc}) ]
     (is= tuple-set #{["James Bond" "London"]
                      ["M" "London"]
                      ["Honey Rider" "Caribbean"]}))
 
+  ;---------------------------------------------------------------------------------------------------
+  ; Let's add some Bond girls into the DB
+
   (defn get-bond-girl-names []
     (let [result-pull     (d/pull (live-db) [:bond-girl] [:person/name "James Bond"])
           bond-girl-names (forv [girl-entity (grab :bond-girl result-pull) ]
-                               (grab :person/name (td/entity-map (live-db) (grab :db/id girl-entity))))
-          ]
-
+                               (grab :person/name (td/entity-map (live-db) (grab :db/id girl-entity)))) ]
       bond-girl-names))
 
   (td/transact *conn*
     (td/new-attribute :bond-girl :db.type/ref :db.cardinality/many)  ; there are many Bond girls
-    (td/new-attribute :best-friend :db.type/ref)  ; one can have many friends
+    (td/new-attribute :best-friend :db.type/ref))  ; one can have many friends
 
-)
   ; #todo modify to use tempIds (string or negative int)
   (let [tx-result          @(td/transact *conn*
                               (td/new-entity {:db/id "user" :person/name "Sylvia Trench" :best-friend "tr"})
@@ -359,7 +369,7 @@
                               (td/new-entity {:db/id "pc" :person/name "Paris Carver" :best-friend "cj"})
                               (td/new-entity {:db/id "cj" :person/name "Christmas Jones" :best-friend "pc"}))
         tx-datoms          (td/tx-datoms (live-db) tx-result)
-        girl-datoms        (vec (remove #(= :db/txInstant (grab :a %)) tx-datoms))
+        girl-datoms        (drop-if #(= :db/txInstant (grab :a %)) tx-datoms)
         girl-eids          (mapv :e girl-datoms)
         txr-2              (td/transact *conn*
                              (td/update [:person/name "James Bond"] ; update using a LookupRef
@@ -378,8 +388,9 @@
           ["Sylvia Trench" "Tatiana Romanova" "Pussy Galore"
            "Octopussy" "Paris Carver" "Christmas Jones" "Honey Rider"] ))
 
-    (let [bibi-eid (only (only (td/find :let [$ (live-db)]
-                                 :find [?eid]
+    (let [bibi-eid (only (only (td/query
+                                 :let [$ (live-db)]
+                                 :yield [?eid]
                                  :where {:db/id ?eid :person/name "Bibi Dahl"})))
 
           bibi     (td/entity-map (live-db) bibi-eid)
@@ -390,4 +401,9 @@
 
   ; #todo verify that datomic/q returns TupleSets (i.e. no duplicate tuples in result)
   )
+
+
+
+
+
 

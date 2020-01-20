@@ -2,10 +2,10 @@
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [
-                 [io.tupelo/datomic "19.12.01" ]
+                 [io.tupelo/datomic "20.01.19" ]
                  [org.clojure/clojure "1.10.1"]
                  [prismatic/schema "1.1.12"]
-                 [tupelo "0.9.182"]
+                 [tupelo "0.9.188"]
                  ]
   :resource-paths ["resources/"
                    "resources/datomic-free-0.9.5661-everything.jar"
